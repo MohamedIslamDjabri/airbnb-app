@@ -52,7 +52,7 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(cors({
   credentials: true,
-  origin: true,
+  origin: process.env.CLIENT_URL,
 }));
 
 // ✅ Helper
