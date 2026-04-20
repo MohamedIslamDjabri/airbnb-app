@@ -1,24 +1,30 @@
-const express = require('express');
-const cors = require('cors');
-const mongoose = require("mongoose");
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const User = require('./models/User.js');
-const Place = require('./models/Place.js');
-const Booking = require('./models/Booking.js');
-const cookieParser = require('cookie-parser');
-const multer = require('multer');
-const dotenv = require('dotenv');
+import express from "express";
+import cors from "cors";
+import mongoose from "mongoose";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import cookieParser from "cookie-parser";
+import multer from "multer";
+import dotenv from "dotenv";
+
+import User from "./models/User.js";
+import Place from "./models/Place.js";
+import Booking from "./models/Booking.js";
+
+import cloudinaryPkg from "cloudinary";
+import { CloudinaryStorage } from "multer-storage-cloudinary";
 
 dotenv.config();
+
 const app = express();
 const PORT = process.env.PORT || 4000;
+
 const bcryptSalt = bcrypt.genSaltSync(10);
 const jwtSecret = process.env.JWT_SECRET;
 
-// ✅ Cloudinary
-const cloudinary = require('cloudinary').v2;
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
+/* ================= CLOUDINARY ================= */
+
+const cloudinary = cloudinaryPkg.v2;
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -26,246 +32,192 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// ✅ Multer + Cloudinary storage
 const storage = new CloudinaryStorage({
   cloudinary,
   params: {
-    folder: 'airbnb-clone/places',
-    allowed_formats: ['jpg', 'png', 'jpeg'],
+    folder: "airbnb-clone",
+    allowed_formats: ["jpg", "png", "jpeg"],
   },
 });
-const photosMiddleware = multer({ storage });
 
-// ✅ DB
+const uploadMiddleware = multer({ storage });
+
+/* ================= DB ================= */
+
 async function connectToDatabase() {
   try {
     await mongoose.connect(process.env.MONGO_URL);
-    console.log('Connected to MongoDB');
-  } catch (error) {
-    console.error('Error connecting to MongoDB:', error.message);
+    console.log("MongoDB connected");
+  } catch (err) {
+    console.error(err);
   }
 }
+
 connectToDatabase();
 
-// ✅ Middlewares
+/* ================= MIDDLEWARE ================= */
+
 app.use(express.json());
 app.use(cookieParser());
-app.use(cors({
-  credentials: true,
-  origin: process.env.CLIENT_URL,
-}));
 
-// ✅ Helper
+app.use(
+  cors({
+    credentials: true,
+    origin: process.env.CLIENT_URL,
+  })
+);
+
+/* ================= AUTH HELPER ================= */
+
 function getUserDataFromReq(req) {
   return new Promise((resolve, reject) => {
     jwt.verify(req.cookies.token, jwtSecret, {}, (err, userData) => {
-      if (err) throw err;
+      if (err) return reject(err);
       resolve(userData);
     });
   });
 }
 
-// ================= AUTH =================
+/* ================= AUTH ================= */
 
-app.post('/api/register', async (req,res) => {
-  const {name,email,password} = req.body;
+app.post("/api/register", async (req, res) => {
+  const { name, email, password } = req.body;
 
-  try {
-    const userDoc = await User.create({
-      name,
-      email,
-      password: bcrypt.hashSync(password, bcryptSalt),
-    });
-    res.json(userDoc);
-  } catch (e) {
-    res.status(422).json(e);
-  }
+  const userDoc = await User.create({
+    name,
+    email,
+    password: bcrypt.hashSync(password, bcryptSalt),
+  });
+
+  res.json(userDoc);
 });
 
-app.post('/api/login', async (req,res) => {
-  const {email,password} = req.body;
-  const userDoc = await User.findOne({email});
+app.post("/api/login", async (req, res) => {
+  const { email, password } = req.body;
 
-  if (!userDoc) {
-    return res.status(422).json('User not found');
-  }
+  const userDoc = await User.findOne({ email });
+  if (!userDoc) return res.status(422).json("User not found");
 
   const passOk = bcrypt.compareSync(password, userDoc.password);
+  if (!passOk) return res.status(422).json("Wrong password");
 
-  if (passOk) {
-    jwt.sign({
-      email:userDoc.email,
-      id:userDoc._id
-    }, jwtSecret, {}, (err,token) => {
+  jwt.sign(
+    { email: userDoc.email, id: userDoc._id },
+    jwtSecret,
+    {},
+    (err, token) => {
       if (err) throw err;
-      res.cookie('token', token).json(userDoc);
-    });
-  } else {
-    res.status(422).json('Wrong password');
-  }
+
+      res.cookie("token", token, {
+        httpOnly: true,
+        sameSite: "none",
+        secure: true,
+      });
+
+      res.json(userDoc);
+    }
+  );
 });
 
-app.get('/api/profile', async (req,res) => {
-  const {token} = req.cookies;
-
+app.get("/api/profile", async (req, res) => {
+  const { token } = req.cookies;
   if (!token) return res.json(null);
 
   jwt.verify(token, jwtSecret, {}, async (err, userData) => {
-    if (err) throw err;
+    if (err) return res.json(null);
+
     const user = await User.findById(userData.id);
     res.json(user);
   });
 });
 
-app.post('/api/logout', (req,res) => {
-  res.cookie('token', '').json(true);
+app.post("/api/logout", (req, res) => {
+  res.cookie("token", "").json(true);
 });
 
-// ================= UPLOAD =================
+/* ================= UPLOAD ================= */
 
-// ✅ Upload by link (Cloudinary)
-app.post('/api/upload-by-link', async (req,res) => {
-  const {link} = req.body;
+app.post("/api/upload", uploadMiddleware.array("photos", 100), (req, res) => {
+  const urls = req.files.map((file) => file.path);
+  res.json(urls);
+});
+
+app.post("/api/upload-by-link", async (req, res) => {
+  const { link } = req.body;
 
   const result = await cloudinary.uploader.upload(link, {
-    folder: 'airbnb-clone/places',
+    folder: "airbnb-clone",
   });
 
   res.json(result.secure_url);
 });
 
-// ✅ Upload files
-app.post('/api/upload', photosMiddleware.array('photos', 100), async (req,res) => {
-  const uploadedFiles = [];
+/* ================= PLACES ================= */
 
-  for (let i = 0; i < req.files.length; i++) {
-    uploadedFiles.push(req.files[i].path); // Cloudinary URL
-  }
+app.post("/api/places", async (req, res) => {
+  const userData = await getUserDataFromReq(req);
 
-  res.json(uploadedFiles);
-});
-
-// ================= PLACES =================
-
-app.post('/api/places', async (req,res) => {
-  const {token} = req.cookies;
-
-  const {
-    title,address,addedPhotos,description,price,
-    perks,extraInfo,checkIn,checkOut,maxGuests,
-  } = req.body;
-
-  jwt.verify(token, jwtSecret, {}, async (err, userData) => {
-    if (err) throw err;
-
-    const placeDoc = await Place.create({
-      owner: userData.id,
-      price,
-      title,
-      address,
-      photos: addedPhotos, // ✅ Cloudinary URLs
-      description,
-      perks,
-      extraInfo,
-      checkIn,
-      checkOut,
-      maxGuests,
-    });
-
-    res.json(placeDoc);
+  const place = await Place.create({
+    owner: userData.id,
+    ...req.body,
   });
+
+  res.json(place);
 });
 
-app.get('/api/user-places', async (req,res) => {
-  const {token} = req.cookies;
-
-  jwt.verify(token, jwtSecret, {}, async (err, userData) => {
-    const {id} = userData;
-    res.json(await Place.find({owner:id}));
-  });
-});
-
-app.get('/api/places/:id', async (req,res) => {
-  const {id} = req.params;
-  res.json(await Place.findById(id));
-});
-
-app.put('/api/places', async (req,res) => {
-  const {token} = req.cookies;
-
-  const {
-    id, title,address,addedPhotos,description,
-    perks,extraInfo,checkIn,checkOut,maxGuests,price,
-  } = req.body;
-
-  jwt.verify(token, jwtSecret, {}, async (err, userData) => {
-    if (err) throw err;
-
-    const placeDoc = await Place.findById(id);
-
-    if (userData.id === placeDoc.owner.toString()) {
-      placeDoc.set({
-        title,
-        address,
-        photos: addedPhotos, // ✅ updated URLs
-        description,
-        perks,
-        extraInfo,
-        checkIn,
-        checkOut,
-        maxGuests,
-        price,
-      });
-
-      await placeDoc.save();
-      res.json('ok');
-    }
-  });
-});
-
-app.get('/api/places', async (req,res) => {
+app.get("/api/places", async (req, res) => {
   res.json(await Place.find());
 });
 
-// ================= BOOKINGS =================
+app.get("/api/user-places", async (req, res) => {
+  const userData = await getUserDataFromReq(req);
 
-app.post('/api/bookings', async (req, res) => {
+  res.json(await Place.find({ owner: userData.id }));
+});
+
+app.get("/api/places/:id", async (req, res) => {
+  res.json(await Place.findById(req.params.id));
+});
+
+app.put("/api/places", async (req, res) => {
+  const userData = await getUserDataFromReq(req);
+
+  const place = await Place.findById(req.body.id);
+
+  if (userData.id === place.owner.toString()) {
+    Object.assign(place, req.body);
+    await place.save();
+    res.json("ok");
+  }
+});
+
+/* ================= BOOKINGS ================= */
+
+app.post("/api/bookings", async (req, res) => {
   try {
     const userData = await getUserDataFromReq(req);
 
-    const {
-      place,
-      checkIn,
-      checkOut,
-      numberOfGuests,
-      name,
-      phone,
-      price,
-    } = req.body;
-
     const booking = await Booking.create({
-      place,
-      checkIn,
-      checkOut,
-      numberOfGuests,
-      name,
-      phone,
-      price,
+      ...req.body,
       user: userData.id,
     });
 
     res.json(booking);
-
   } catch (err) {
-    console.log('Booking error:', err.message);
     res.status(400).json({ error: err.message });
   }
 });
 
-app.get('/api/bookings', async (req,res) => {
+app.get("/api/bookings", async (req, res) => {
   const userData = await getUserDataFromReq(req);
-  res.json(await Booking.find({user:userData.id}).populate('place'));
+
+  const bookings = await Booking.find({ user: userData.id }).populate(
+    "place"
+  );
+
+  res.json(bookings);
 });
+
 
 // ================= START =================
 
